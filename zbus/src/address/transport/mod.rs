@@ -12,14 +12,10 @@ use async_io::Async;
 use std::collections::HashMap;
 #[cfg(not(feature = "tokio"))]
 use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::unix::net::{SocketAddr, UnixStream};
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 #[cfg(feature = "tokio-vsock")]
 use tokio_vsock::VsockStream;
-#[cfg(windows)]
-use uds_windows::UnixStream;
 #[cfg(all(feature = "vsock", not(feature = "tokio")))]
 use vsock::VsockStream;
 #[cfg(unix)]
@@ -33,7 +29,7 @@ use std::{
 };
 
 mod unix;
-pub use unix::{Unix, UnixSocket};
+pub use unix::{Unix, UnixSocket, UnixStream};
 mod tcp;
 pub use tcp::{Tcp, TcpTransportFamily};
 #[cfg(windows)]
@@ -55,8 +51,6 @@ pub use ibus::Ibus;
 #[path = "vsock.rs"]
 // Gotta rename to avoid name conflict with the `vsock` crate.
 mod vsock_transport;
-#[cfg(target_os = "linux")]
-use std::os::linux::net::SocketAddrExt;
 #[cfg(any(
     all(feature = "vsock", not(feature = "tokio")),
     feature = "tokio-vsock"
@@ -102,58 +96,12 @@ impl Transport {
     #[cfg_attr(any(unix, windows), async_recursion::async_recursion)]
     pub(super) async fn connect(self) -> Result<Stream> {
         match self {
+            #[allow(unused_variables)]
             Transport::Unix(unix) => {
-                // This is a `path` in case of Windows until uds_windows provides the needed API:
-                // https://github.com/haraldh/rust_uds_windows/issues/14
-                let addr = match unix.take_path() {
-                    #[cfg(unix)]
-                    UnixSocket::File(path) => SocketAddr::from_pathname(path)?,
-                    #[cfg(windows)]
-                    UnixSocket::File(path) => path,
-                    #[cfg(target_os = "linux")]
-                    UnixSocket::Abstract(name) => {
-                        SocketAddr::from_abstract_name(name.as_encoded_bytes())?
-                    }
-                    UnixSocket::Dir(_) | UnixSocket::TmpDir(_) => {
-                        // You can't connect to a unix:dir.
-                        return Err(Error::Unsupported);
-                    }
-                };
-                let stream = crate::Task::spawn_blocking(
-                    move || -> Result<_> {
-                        #[cfg(unix)]
-                        let stream = UnixStream::connect_addr(&addr)?;
-                        #[cfg(windows)]
-                        let stream = UnixStream::connect(addr)?;
-                        stream.set_nonblocking(true)?;
-
-                        Ok(stream)
-                    },
-                    "unix stream connection",
-                )
-                .await??;
-                #[cfg(not(feature = "tokio"))]
-                {
-                    Async::new(stream)
-                        .map(Stream::Unix)
-                        .map_err(|e| Error::InputOutput(e.into()))
-                }
-
-                #[cfg(feature = "tokio")]
-                {
-                    #[cfg(unix)]
-                    {
-                        tokio::net::UnixStream::from_std(stream)
-                            .map(Stream::Unix)
-                            .map_err(|e| Error::InputOutput(e.into()))
-                    }
-
-                    #[cfg(not(unix))]
-                    {
-                        let _ = stream;
-                        Err(Error::Unsupported)
-                    }
-                }
+                #[cfg(all(not(unix), feature = "tokio"))]
+                return Err(Error::Unsupported);
+                #[cfg(any(unix, not(feature = "tokio")))]
+                unix.connect().await.map(Stream::Unix)
             }
             #[cfg(unix)]
             Transport::Unixexec(unixexec) => unixexec.connect().await.map(Stream::Unixexec),
