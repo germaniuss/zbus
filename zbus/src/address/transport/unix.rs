@@ -1,4 +1,4 @@
-#[allow(unused_imports)]
+#[cfg(any(unix, not(feature = "tokio")))]
 use crate::{Error, Result};
 
 #[cfg(target_os = "linux")]
@@ -18,11 +18,9 @@ use async_io::Async;
 #[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
 #[cfg(unix)]
-use std::os::unix::net::SocketAddr;
-#[cfg(unix)]
-pub use std::os::unix::net::UnixStream;
-#[cfg(windows)]
-pub use uds_windows::UnixStream;
+use std::os::unix::net::{SocketAddr, UnixStream};
+#[cfg(all(windows, not(feature = "tokio")))]
+use uds_windows::UnixStream;
 
 /// A Unix domain socket transport in a D-Bus address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,34 +42,6 @@ impl Unix {
     /// Take the path, consuming `self`.
     pub fn take_path(self) -> UnixSocket {
         self.path
-    }
-
-    #[cfg(all(windows, not(feature = "tokio")))]
-    fn take_addr(self) -> Result<PathBuf> {
-        // This is a `path` in case of Windows until uds_windows provides the needed API:
-        // https://github.com/haraldh/rust_uds_windows/issues/14
-        match self.take_path() {
-            UnixSocket::File(path) => Ok(path),
-            UnixSocket::Dir(_) | UnixSocket::TmpDir(_) => {
-                // You can't connect to a unix:dir.
-                Err(Error::Unsupported)
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn take_addr(self) -> Result<SocketAddr> {
-        match self.take_path() {
-            UnixSocket::File(path) => Ok(SocketAddr::from_pathname(path)?),
-            #[cfg(target_os = "linux")]
-            UnixSocket::Abstract(name) => {
-                Ok(SocketAddr::from_abstract_name(name.as_encoded_bytes())?)
-            }
-            UnixSocket::Dir(_) | UnixSocket::TmpDir(_) => {
-                // You can't connect to a unix:dir.
-                Err(Error::Unsupported)
-            }
-        }
     }
 
     pub(super) fn from_options(opts: std::collections::HashMap<&str, &str>) -> crate::Result<Self> {
@@ -101,30 +71,24 @@ impl Unix {
 
     #[cfg(not(feature = "tokio"))]
     pub(super) async fn connect(self) -> Result<Async<UnixStream>> {
-        let addr = self.take_addr()?;
-
-        let stream = crate::Task::spawn_blocking(
-            move || -> Result<_> {
-                #[cfg(unix)]
-                let stream = UnixStream::connect_addr(&addr)?;
-                #[cfg(windows)]
-                let stream = UnixStream::connect(addr)?;
-                stream.set_nonblocking(true)?;
-
-                Ok(stream)
-            },
-            "unix stream connection",
-        )
-        .await??;
-
+        let stream = self.get_stream().await?;
         Async::new(stream).map_err(|e| Error::InputOutput(e.into()))
     }
 
     #[cfg(all(unix, feature = "tokio"))]
     pub(super) async fn connect(self) -> Result<tokio::net::UnixStream> {
-        let addr = self.take_addr()?;
+        let stream = self.get_stream().await?;
+        tokio::net::UnixStream::from_std(stream).map_err(|e| Error::InputOutput(e.into()))
+    }
 
-        let stream = crate::Task::spawn_blocking(
+    #[cfg(any(unix, not(feature = "tokio")))]
+    async fn get_stream(self) -> Result<UnixStream> {
+        #[cfg(unix)]
+        let addr = self.take_socket_addr()?;
+        #[cfg(windows)]
+        let addr = self.take_path_addr()?;
+
+        crate::Task::spawn_blocking(
             move || -> Result<_> {
                 #[cfg(unix)]
                 let stream = UnixStream::connect_addr(&addr)?;
@@ -136,9 +100,35 @@ impl Unix {
             },
             "unix stream connection",
         )
-        .await??;
+        .await?
+    }
 
-        tokio::net::UnixStream::from_std(stream).map_err(|e| Error::InputOutput(e.into()))
+    #[cfg(all(windows, not(feature = "tokio")))]
+    fn take_path_addr(self) -> Result<PathBuf> {
+        // This is a `path` in case of Windows until uds_windows provides the needed API:
+        // https://github.com/haraldh/rust_uds_windows/issues/14
+        match self.take_path() {
+            UnixSocket::File(path) => Ok(path),
+            UnixSocket::Dir(_) | UnixSocket::TmpDir(_) => {
+                // You can't connect to a unix:dir.
+                Err(Error::Unsupported)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn take_socket_addr(self) -> Result<SocketAddr> {
+        match self.take_path() {
+            UnixSocket::File(path) => Ok(SocketAddr::from_pathname(path)?),
+            #[cfg(target_os = "linux")]
+            UnixSocket::Abstract(name) => {
+                Ok(SocketAddr::from_abstract_name(name.as_encoded_bytes())?)
+            }
+            UnixSocket::Dir(_) | UnixSocket::TmpDir(_) => {
+                // You can't connect to a unix:dir.
+                Err(Error::Unsupported)
+            }
+        }
     }
 }
 

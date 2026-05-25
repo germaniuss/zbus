@@ -12,10 +12,14 @@ use async_io::Async;
 use std::collections::HashMap;
 #[cfg(not(feature = "tokio"))]
 use std::net::TcpStream;
+#[cfg(all(unix, not(feature = "tokio")))]
+use std::os::unix::net::UnixStream;
 #[cfg(feature = "tokio")]
 use tokio::net::TcpStream;
 #[cfg(feature = "tokio-vsock")]
 use tokio_vsock::VsockStream;
+#[cfg(all(windows, not(feature = "tokio")))]
+use uds_windows::UnixStream;
 #[cfg(all(feature = "vsock", not(feature = "tokio")))]
 use vsock::VsockStream;
 #[cfg(unix)]
@@ -29,7 +33,7 @@ use std::{
 };
 
 mod unix;
-pub use unix::{Unix, UnixSocket, UnixStream};
+pub use unix::{Unix, UnixSocket};
 mod tcp;
 pub use tcp::{Tcp, TcpTransportFamily};
 #[cfg(windows)]
@@ -96,13 +100,11 @@ impl Transport {
     #[cfg_attr(any(unix, windows), async_recursion::async_recursion)]
     pub(super) async fn connect(self) -> Result<Stream> {
         match self {
-            #[allow(unused_variables)]
-            Transport::Unix(unix) => {
-                #[cfg(all(not(unix), feature = "tokio"))]
-                return Err(Error::Unsupported);
-                #[cfg(any(unix, not(feature = "tokio")))]
-                unix.connect().await.map(Stream::Unix)
-            }
+            #[cfg(all(not(unix), feature = "tokio"))]
+            Transport::Unix(_) => Err(Error::Unsupported),
+            #[cfg(any(unix, not(feature = "tokio")))]
+            Transport::Unix(unix) => unix.connect().await.map(Stream::Unix),
+
             #[cfg(unix)]
             Transport::Unixexec(unixexec) => unixexec.connect().await.map(Stream::Unixexec),
             #[cfg(all(feature = "vsock", not(feature = "tokio")))]
